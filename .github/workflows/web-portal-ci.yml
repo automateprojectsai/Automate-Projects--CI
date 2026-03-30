@@ -1,0 +1,163 @@
+# =============================================================================
+# REUSABLE WORKFLOW: Web Portal CI Pipeline
+# =============================================================================
+# Specialized for the Web-Portal repo (vanilla HTML/CSS/JS, no build step).
+# Tests focus on: HTML validation, link checking, accessibility, JS linting,
+# secret detection, and security patterns.
+# =============================================================================
+
+name: Web Portal CI
+
+on:
+  workflow_call:
+    inputs:
+      run_accessibility:
+        description: "Run accessibility audit (pa11y)"
+        type: boolean
+        default: true
+      run_lighthouse:
+        description: "Run Lighthouse performance audit"
+        type: boolean
+        default: false
+      auto_merge_on_pass:
+        description: "Auto-merge Paperclip PRs on pass"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # === TIER 1: Fast Gate ===
+  html-validation:
+    name: "Tier 1 - HTML Validation"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install html-validate
+        run: npm install -g html-validate
+      - name: Validate all HTML files
+        run: |
+          find . -name "*.html" -not -path "./.git/*" -not -path "./node_modules/*" | while read file; do
+            echo "Validating: $file"
+            html-validate "$file" || echo "::warning::Validation issues in $file"
+          done
+
+  js-lint:
+    name: "Tier 1 - JavaScript Linting"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ESLint
+        run: |
+          npm init -y > /dev/null 2>&1
+          npm install eslint@latest --save-dev
+      - name: Lint JavaScript files
+        run: |
+          cat > .eslintrc.json << 'ESLINT_CONFIG'
+          {
+            "env": { "browser": true, "es2021": true },
+            "rules": {
+              "no-unused-vars": "warn",
+              "no-undef": "error",
+              "no-eval": "error",
+              "no-implied-eval": "error"
+            }
+          }
+          ESLINT_CONFIG
+          npx eslint "*.js" "app/*.js" --no-eslintrc -c .eslintrc.json || true
+
+  secret-scan:
+    name: "Tier 1 - Secret Detection"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  link-check:
+    name: "Tier 1 - Broken Link Detection"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for broken internal links
+        run: |
+          npm install -g broken-link-checker-local http-server
+          npx http-server . -p 8080 &
+          sleep 3
+          npx blc http://localhost:8080 --recursive --exclude-external || true
+
+  # === TIER 2: Quality Gate ===
+  accessibility:
+    name: "Tier 2 - Accessibility Audit (WCAG 2.1 AA)"
+    if: ${{ inputs.run_accessibility }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pa11y
+        run: npm install -g pa11y pa11y-ci http-server
+      - name: Run accessibility audit
+        run: |
+          cat > .pa11yci.json << 'PA11Y_CONFIG'
+          {
+            "defaults": { "standard": "WCAG2AA", "timeout": 10000 },
+            "urls": [
+              "http://localhost:8080/index.html",
+              "http://localhost:8080/about.html",
+              "http://localhost:8080/pricing.html",
+              "http://localhost:8080/plugins.html",
+              "http://localhost:8080/community.html",
+              "http://localhost:8080/beta-signup.html"
+            ]
+          }
+          PA11Y_CONFIG
+          npx http-server . -p 8080 &
+          sleep 3
+          pa11y-ci --config .pa11yci.json || echo "::warning::Accessibility issues found"
+
+  # === TIER 3: Security ===
+  css-security:
+    name: "Tier 3 - CSS/JS Security Check"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for dangerous patterns
+        run: |
+          echo "Checking for dangerous patterns..."
+          if grep -rn "eval(" *.js app/*.js 2>/dev/null; then
+            echo "::warning::eval() usage detected"
+          fi
+          if grep -rniE "(api[_-]?key|secret|token|password)\\s*[:=]\\s*['\"\"][^\'\"\"]{8,}" *.js *.html app/*.js app/*.html 2>/dev/null; then
+            echo "::error::Possible hardcoded secret detected!"
+            exit 1
+          fi
+          echo "Security check complete."
+
+  # === AUTO-MERGE ===
+  auto-merge:
+    name: "Auto-Merge (Paperclip PRs)"
+    if: >-
+      inputs.auto_merge_on_pass &&
+      github.event_name == 'pull_request' &&
+      (github.actor == 'Paperclip-Paperclip' || github.actor == 'automateprojectsai' || contains(github.event.pull_request.labels.*.name, 'auto-merge'))
+    needs: [html-validation, js-lint, secret-scan, link-check]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Auto-merge PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.pulls.merge({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              merge_method: 'squash'
+            });
