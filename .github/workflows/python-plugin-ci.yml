@@ -61,6 +61,7 @@ jobs:
     name: "Tier 1 - Secret Detection"
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pull-requests: read
     steps:
       - uses: actions/checkout@v4
@@ -193,11 +194,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run Bandit
-        uses: PyCQA/bandit-action@v1
+      - uses: actions/setup-python@v5
         with:
-          targets: "app/"
-          severity: "medium"
+          python-version: "3.12"
+
+      - name: Run Bandit
+        run: |
+          pip install bandit
+          bandit -r app/ -ll --exclude tests/
 
   container-scan:
     name: "Tier 3 - Container Image Scan"
