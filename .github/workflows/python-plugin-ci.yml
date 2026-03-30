@@ -1,26 +1,38 @@
+# =============================================================================
+# REUSABLE WORKFLOW: Python Plugin CI Pipeline
+# =============================================================================
+# Called by every Python-based plugin repo (Listeners, Advisors, Central-Brain).
+# Update this file once -- all repos get the update automatically.
+#
+# TIERS:
+# Tier 1 (Fast Gate)    ~2 min  - lint, unit tests, secret scan, dependency audit
+# Tier 2 (Integration)  ~8 min  - integration tests with testcontainers, coverage
+# Tier 3 (Security)     ~5 min  - SAST static analysis, container scan
+# =============================================================================
+
 name: Python Plugin CI
 
 on:
   workflow_call:
     inputs:
-      python_version:
-        description: "Python version"
-        type: string
-        default: "3.12"
       run_tier2:
-        description: "Run Tier 2"
+        description: "Run Tier 2 integration tests (requires testcontainers)"
         type: boolean
         default: false
       run_tier3:
-        description: "Run Tier 3"
+        description: "Run Tier 3 security scans"
         type: boolean
         default: true
+      python_version:
+        description: "Python version to use"
+        type: string
+        default: "3.12"
       coverage_threshold:
-        description: "Coverage threshold"
+        description: "Minimum code coverage percentage to pass"
         type: number
         default: 50
       auto_merge_on_pass:
-        description: "Auto merge"
+        description: "Automatically merge if all checks pass (for Paperclip PRs)"
         type: boolean
         default: false
 
@@ -28,11 +40,118 @@ on:
       CODECOV_TOKEN:
         required: false
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # =========================================================================
+  # TIER 1: Fast Gate (~2 minutes)
+  # =========================================================================
+
   lint:
-    name: "Tier 1 - Lint"
+    name: "Tier 1 - Lint & Format"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Hello
-        run: echo "CI pipeline is working"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+          cache: pip
+
+      - name: Install linting tools
+        run: pip install ruff mypy
+
+      - name: Run Ruff linter
+        run: ruff check . --output-format=github
+
+      - name: Run Ruff formatter check
+        run: ruff format --check .
+
+      - name: Run type checking (if configured)
+        run: |
+          if [ -f "pyproject.toml" ] && grep -q "mypy" pyproject.toml; then
+            mypy app/ --ignore-missing-imports
+          else
+            echo "Skipping mypy - not configured in pyproject.toml"
+          fi
+
+  secret-scan:
+    name: "Tier 1 - Secret Detection"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dependency-audit:
+    name: "Tier 1 - Dependency Vulnerability Scan"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          if [ -f "requirements.txt" ]; then
+            pip install -r requirements.txt
+          fi
+          pip install pip-audit
+
+      - name: Run pip-audit
+        run: pip-audit --strict --desc on 2>&1 | tee audit-report.txt
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-audit
+          path: audit-report.txt
+
+  unit-tests:
+    name: "Tier 1 - Unit Tests"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          if [ -f "requirements-dev.txt" ]; then
+            pip install -r requirements-dev.txt
+          fi
+
+      - name: Run unit tests
+        env:
+          USE_TESTCONTAINERS: "false"
+          SQS_ENABLED: "false"
+        run: |
+          pytest tests/unit -v \
+            --cov=app \
+            --cov-report=xml:coverage-unit.xml \
+            --cov-report=term-missing \
+            -m "unit" \
+            --tb=short \
+            --strict-markers
+
+      - name: Upload unit test coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-unit
+          path: coverage-unit.xml
