@@ -144,6 +144,7 @@ jobs:
     if: ${{ inputs.run_tier2 }}
     needs: [unit-tests]
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     services:
       docker:
         image: docker:dind
@@ -288,3 +289,4 @@ jobs:
               merge_method: 'squash'
             });
             console.log('Auto-merge triggered for Paperclip PR');
+
