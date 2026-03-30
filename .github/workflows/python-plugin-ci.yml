@@ -1,0 +1,230 @@
+# =============================================================================
+# REUSABLE WORKFLOW: Python Plugin CI Pipeline
+# =============================================================================
+# Called by every Python-based plugin repo via a 5-line caller workflow.
+# Update this file once — all 46 repos get the update automatically.
+# Tiers: Fast Gate (~2m), Integration (~8m), Security (~5m)
+# =============================================================================
+
+name: Python Plugin CI
+
+on:
+  workflow_call:
+    inputs:
+      run_tier2:
+        description: "Run Tier 2 integration tests"
+        type: boolean
+        default: false
+      run_tier3:
+        description: "Run Tier 3 security scans"
+        type: boolean
+        default: true
+      python_version:
+        description: "Python version to use"
+        type: string
+        default: "3.12"
+      coverage_threshold:
+        description: "Minimum code coverage percentage to pass"
+        type: number
+        default: 50
+      auto_merge_on_pass:
+        description: "Auto-merge if all checks pass (Paperclip PRs)"
+        type: boolean
+        default: false
+    secrets:
+      CODECOV_TOKEN:
+        required: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # === TIER 1: Fast Gate (~2 min) — Every PR, every repo ===
+  lint:
+    name: "Tier 1 - Lint & Format"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+          cache: pip
+      - name: Install linting tools
+        run: pip install ruff mypy
+      - name: Run Ruff linter
+        run: ruff check . --output-format=github
+      - name: Run Ruff formatter check
+        run: ruff format --check .
+
+  secret-scan:
+    name: "Tier 1 - Secret Detection"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dependency-audit:
+    name: "Tier 1 - Dependency Vulnerability Scan"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+          cache: pip
+      - name: Install dependencies
+        run: |
+          if [ -f "requirements.txt" ]; then pip install -r requirements.txt; fi
+          pip install pip-audit
+      - name: Run pip-audit
+        run: pip-audit --strict --desc on 2>&1 | tee audit-report.txt
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-audit
+          path: audit-report.txt
+
+  unit-tests:
+    name: "Tier 1 - Unit Tests"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+          cache: pip
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          if [ -f "requirements-dev.txt" ]; then pip install -r requirements-dev.txt; fi
+      - name: Run unit tests
+        env:
+          USE_TESTCONTAINERS: "false"
+          SQS_ENABLED: "false"
+        run: |
+          pytest tests/unit -v --cov=app --cov-report=xml:coverage-unit.xml -m "unit" --tb=short --strict-markers
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-unit
+          path: coverage-unit.xml
+
+  # === TIER 2: Integration Gate (~8 min) — Repos that opt in ===
+  integration-tests:
+    name: "Tier 2 - Integration Tests"
+    if: ${{ inputs.run_tier2 }}
+    needs: [unit-tests]
+    runs-on: ubuntu-latest
+    services:
+      docker:
+        image: docker:dind
+        options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+          cache: pip
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          if [ -f "requirements-dev.txt" ]; then pip install -r requirements-dev.txt; fi
+      - name: Run integration tests
+        env:
+          USE_TESTCONTAINERS: "true"
+          SQS_ENABLED: "false"
+          JWT_SECRET: "ci-test-secret-not-for-production"
+          AWS_ACCESS_KEY_ID: "testing"
+          AWS_SECRET_ACCESS_KEY: "testing"
+          AWS_DEFAULT_REGION: "us-east-1"
+        run: |
+          pytest tests/api tests/integration -v --cov=app --cov-report=xml:coverage-integration.xml --cov-fail-under=${{ inputs.coverage_threshold }} -m "api or integration" --tb=short --strict-markers
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-integration
+          path: coverage-integration.xml
+
+  # === TIER 3: Security Gate (~5 min) ===
+  sast-scan:
+    name: "Tier 3 - Static Security Analysis"
+    if: ${{ inputs.run_tier3 }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Bandit
+        uses: PyCQA/bandit-action@v1
+        with:
+          targets: "app/"
+          severity: "medium"
+
+  container-scan:
+    name: "Tier 3 - Container Image Scan"
+    if: ${{ inputs.run_tier3 && hashFiles('Dockerfile') != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t scan-target:latest .
+      - name: Run Trivy scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "scan-target:latest"
+          format: "table"
+          exit-code: "1"
+          severity: "CRITICAL,HIGH"
+          ignore-unfixed: true
+
+  # === COVERAGE GATE ===
+  coverage-gate:
+    name: "Coverage Gate"
+    needs: [unit-tests]
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage-unit
+      - name: Check coverage threshold
+        run: |
+          pip install coverage
+          COVERAGE=$(python -c "import xml.etree.ElementTree as ET; tree=ET.parse('coverage-unit.xml'); print(f'{float(tree.getroot().attrib.get(chr(108)+chr(105)+chr(110)+chr(101)+chr(45)+chr(114)+chr(97)+chr(116)+chr(101),0))*100:.1f}')")
+          echo "Coverage: ${COVERAGE}%"
+          if (( $(echo "$COVERAGE < ${{ inputs.coverage_threshold }}" | bc -l) )); then
+            echo "::error::Coverage below threshold"
+            exit 1
+          fi
+
+  # === AUTO-MERGE for Paperclip PRs ===
+  auto-merge:
+    name: "Auto-Merge (Paperclip PRs)"
+    if: >-
+      inputs.auto_merge_on_pass &&
+      github.event_name == 'pull_request' &&
+      (github.actor == 'Paperclip-Paperclip' || github.actor == 'automateprojectsai' || contains(github.event.pull_request.labels.*.name, 'auto-merge'))
+    needs: [lint, secret-scan, dependency-audit, unit-tests, coverage-gate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Auto-merge PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.pulls.merge({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              merge_method: 'squash'
+            });
