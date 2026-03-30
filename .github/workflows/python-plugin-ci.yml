@@ -60,6 +60,8 @@ jobs:
   secret-scan:
     name: "Tier 1 - Secret Detection"
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -195,7 +197,6 @@ jobs:
       - name: Run Bandit
         uses: PyCQA/bandit-action@v1
         with:
-          configfile: ""
           targets: "app/"
           severity: "medium"
 
