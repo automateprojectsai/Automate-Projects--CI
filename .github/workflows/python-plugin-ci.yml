@@ -1,15 +1,3 @@
-# =============================================================================
-# REUSABLE WORKFLOW: Python Plugin CI Pipeline
-# =============================================================================
-# Called by every Python-based plugin repo (Listeners, Advisors, Central-Brain).
-# Update this file once -- all repos get the update automatically.
-#
-# TIERS:
-# Tier 1 (Fast Gate)    ~2 min  - lint, unit tests, secret scan, dependency audit
-# Tier 2 (Integration)  ~8 min  - integration tests with testcontainers, coverage
-# Tier 3 (Security)     ~5 min  - SAST static analysis, container scan
-# =============================================================================
-
 name: Python Plugin CI
 
 on:
@@ -45,12 +33,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # =========================================================================
-  # TIER 1: Fast Gate (~2 minutes)
-  # =========================================================================
-
   lint:
-    name: "Tier 1 - Lint & Format"
+    name: "Tier 1 - Lint and Format"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -69,7 +53,7 @@ jobs:
       - name: Run Ruff formatter check
         run: ruff format --check .
 
-      - name: Run type checking (if configured)
+      - name: Run type checking if configured
         run: |
           if [ -f "pyproject.toml" ] && grep -q "mypy" pyproject.toml; then
             mypy app/ --ignore-missing-imports
@@ -156,10 +140,6 @@ jobs:
           name: coverage-unit
           path: coverage-unit.xml
 
-  # =========================================================================
-  # TIER 2: Integration Gate (~8 minutes)
-  # =========================================================================
-
   integration-tests:
     name: "Tier 2 - Integration Tests"
     if: ${{ inputs.run_tier2 }}
@@ -209,10 +189,6 @@ jobs:
           name: coverage-integration
           path: coverage-integration.xml
 
-  # =========================================================================
-  # TIER 3: Security Gate (~5 minutes)
-  # =========================================================================
-
   sast-scan:
     name: "Tier 3 - Static Security Analysis"
     if: ${{ inputs.run_tier3 }}
@@ -220,7 +196,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run Bandit (Python security linter)
+      - name: Run Bandit
         uses: PyCQA/bandit-action@v1
         with:
           configfile: ""
@@ -229,15 +205,26 @@ jobs:
 
   container-scan:
     name: "Tier 3 - Container Image Scan"
-    if: ${{ inputs.run_tier3 && hashFiles('Dockerfile') != '' }}
+    if: ${{ inputs.run_tier3 }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check for Dockerfile
+        id: check
+        run: |
+          if [ -f "Dockerfile" ]; then
+            echo "has_dockerfile=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_dockerfile=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Build Docker image for scanning
+        if: steps.check.outputs.has_dockerfile == 'true'
         run: docker build -t scan-target:latest .
 
       - name: Run Trivy vulnerability scanner
+        if: steps.check.outputs.has_dockerfile == 'true'
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: "scan-target:latest"
@@ -245,10 +232,6 @@ jobs:
           exit-code: "1"
           severity: "CRITICAL,HIGH"
           ignore-unfixed: true
-
-  # =========================================================================
-  # COVERAGE GATE
-  # =========================================================================
 
   coverage-gate:
     name: "Coverage Gate"
@@ -271,18 +254,15 @@ jobs:
           tree = ET.parse('coverage-unit.xml')
           root = tree.getroot()
           rate = float(root.attrib.get('line-rate', 0))
-          print(f'{rate * 100:.1f}')
+          print(round(rate * 100, 1))
           ")
           echo "Coverage: ${COVERAGE}%"
           echo "Threshold: ${{ inputs.coverage_threshold }}%"
-          if (( $(echo "$COVERAGE < ${{ inputs.coverage_threshold }}" | bc -l) )); then
-            echo "::error::Coverage ${COVERAGE}% is below threshold ${{ inputs.coverage_threshold }}%"
+          threshold=${{ inputs.coverage_threshold }}
+          if [ "$(echo "$COVERAGE < $threshold" | bc -l)" -eq 1 ]; then
+            echo "::error::Coverage ${COVERAGE}% is below threshold ${threshold}%"
             exit 1
           fi
-
-  # =========================================================================
-  # AUTO-MERGE: Merge Paperclip PRs when all checks pass
-  # =========================================================================
 
   auto-merge:
     name: "Auto-Merge (Paperclip PRs)"
