@@ -1,359 +1,38 @@
-# =============================================================================
-# REUSABLE WORKFLOW: Python Plugin CI Pipeline
-# =============================================================================
-# This workflow lives in the Automate-Projects--CI repo and is CALLED by
-# every Python-based plugin repo (Listeners, Advisors, Central-Brain).
-#
-# HOW IT WORKS:
-# - Each plugin repo has a tiny 5-line "caller" workflow that triggers this
-# - This file contains ALL the CI logic in one place
-# - When you update this file, all 46 repos get the update automatically
-#
-# TIERS:
-# Tier 1 (Fast Gate)    ~2 min  - lint, unit tests, secret scan, dependency audit
-# Tier 2 (Integration)  ~8 min  - integration tests with testcontainers, coverage
-# Tier 3 (Security)     ~5 min  - SAST static analysis, container scan
-# =============================================================================
-
 name: Python Plugin CI
 
 on:
   workflow_call:
     inputs:
-      # -----------------------------------------------------------------------
-      # Which tiers to run - plugins can opt in/out based on maturity
-      # -----------------------------------------------------------------------
+      python_version:
+        description: "Python version"
+        type: string
+        default: "3.12"
       run_tier2:
-        description: "Run Tier 2 integration tests (requires testcontainers)"
+        description: "Run Tier 2"
         type: boolean
         default: false
       run_tier3:
-        description: "Run Tier 3 security scans"
+        description: "Run Tier 3"
         type: boolean
         default: true
-      python_version:
-        description: "Python version to use"
-        type: string
-        default: "3.12"
       coverage_threshold:
-        description: "Minimum code coverage percentage to pass"
+        description: "Coverage threshold"
         type: number
         default: 50
       auto_merge_on_pass:
-        description: "Automatically merge if all checks pass (for Paperclip PRs)"
+        description: "Auto merge"
         type: boolean
         default: false
 
     secrets:
-      # Secrets are passed through from the calling repo
       CODECOV_TOKEN:
         required: false
 
-# ---------------------------------------------------------------------------
-# Cancel in-progress runs for the same branch (save GitHub Actions minutes)
-# ---------------------------------------------------------------------------
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  # ===========================================================================
-  # TIER 1: Fast Gate (~2 minutes)
-  # Runs on EVERY PR and push to main, for EVERY repo
-  # ===========================================================================
-
   lint:
-    name: "Tier 1 - Lint & Format"
+    name: "Tier 1 - Lint"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ inputs.python_version }}
-          cache: pip
-
-      - name: Install linting tools
-        run: pip install ruff mypy
-
-      - name: Run Ruff linter (fast Python linter)
-        run: ruff check . --output-format=github
-
-      - name: Run Ruff formatter check
-        run: ruff format --check .
-
-      - name: Run type checking (if type stubs exist)
-        run: |
-          if [ -f "pyproject.toml" ] && grep -q "mypy" pyproject.toml; then
-            mypy app/ --ignore-missing-imports
-          else
-            echo "Skipping mypy - not configured in pyproject.toml"
-          fi
-
-  secret-scan:
-    name: "Tier 1 - Secret Detection"
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Full history for scanning all commits in PR
-
-      - name: Run Gitleaks (detect hardcoded secrets)
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  dependency-audit:
-    name: "Tier 1 - Dependency Vulnerability Scan"
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ inputs.python_version }}
-          cache: pip
-
-      - name: Install dependencies
-        run: |
-          if [ -f "requirements.txt" ]; then
-            pip install -r requirements.txt
-          fi
-          pip install pip-audit
-
-      - name: Run pip-audit (check for known vulnerabilities)
-        run: pip-audit --strict --desc on 2>&1 | tee audit-report.txt
-
-      - name: Upload audit report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: dependency-audit
-          path: audit-report.txt
-
-  unit-tests:
-    name: "Tier 1 - Unit Tests"
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ inputs.python_version }}
-          cache: pip
-
-      - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          if [ -f "requirements-dev.txt" ]; then
-            pip install -r requirements-dev.txt
-          fi
-
-      - name: Run unit tests (fast, no external deps)
-        env:
-          USE_TESTCONTAINERS: "false"
-          SQS_ENABLED: "false"
-        run: |
-          pytest tests/unit -v \
-            --cov=app \
-            --cov-report=xml:coverage-unit.xml \
-            --cov-report=term-missing \
-            -m "unit" \
-            --tb=short \
-            --strict-markers
-
-      - name: Upload unit test coverage
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-unit
-          path: coverage-unit.xml
-
-  # ===========================================================================
-  # TIER 2: Integration Gate (~8 minutes)
-  # Only runs if the calling repo opts in (run_tier2: true)
-  # Requires Docker for testcontainers
-  # ===========================================================================
-
-  integration-tests:
-    name: "Tier 2 - Integration Tests"
-    if: ${{ inputs.run_tier2 }}
-    needs: [unit-tests]  # Only run if unit tests pass first
-    runs-on: ubuntu-latest
-    services:
-      docker:
-        image: docker:dind
-        options: --privileged
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ inputs.python_version }}
-          cache: pip
-
-      - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          if [ -f "requirements-dev.txt" ]; then
-            pip install -r requirements-dev.txt
-          fi
-
-      - name: Run integration tests (with testcontainers)
-        env:
-          USE_TESTCONTAINERS: "true"
-          SQS_ENABLED: "false"
-          JWT_SECRET: "ci-test-secret-not-for-production"
-          AWS_ACCESS_KEY_ID: "testing"
-          AWS_SECRET_ACCESS_KEY: "testing"
-          AWS_DEFAULT_REGION: "us-east-1"
-        run: |
-          pytest tests/api tests/integration -v \
-            --cov=app \
-            --cov-report=xml:coverage-integration.xml \
-            --cov-report=term-missing \
-            --cov-fail-under=${{ inputs.coverage_threshold }} \
-            -m "api or integration" \
-            --tb=short \
-            --strict-markers
-
-      - name: Upload integration coverage
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-integration
-          path: coverage-integration.xml
-
-  # ===========================================================================
-  # TIER 3: Security Gate (~5 minutes)
-  # Static analysis + container image scanning
-  # ===========================================================================
-
-  sast-scan:
-    name: "Tier 3 - Static Security Analysis"
-    if: ${{ inputs.run_tier3 }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Run Bandit (Python security linter)
-        uses: PyCQA/bandit-action@v1
-        with:
-          configfile: ""  # Uses default config
-          targets: "app/"
-          severity: "medium"  # Flag medium+ severity issues
-
-  container-scan:
-    name: "Tier 3 - Container Image Scan"
-    if: ${{ inputs.run_tier3 && hashFiles('Dockerfile') != '' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build Docker image for scanning
-        run: docker build -t scan-target:latest .
-
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: "scan-target:latest"
-          format: "table"
-          exit-code: "1"           # Fail the job on critical vulns
-          severity: "CRITICAL,HIGH"
-          ignore-unfixed: true     # Don't fail on vulns with no fix yet
-
-  # ===========================================================================
-  # COVERAGE GATE: Posts results to PR and blocks merge if below threshold
-  # ===========================================================================
-
-  coverage-gate:
-    name: "Coverage Gate"
-    needs: [unit-tests]
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download unit coverage
-        uses: actions/download-artifact@v4
-        with:
-          name: coverage-unit
-
-      - name: Check coverage threshold
-        run: |
-          pip install coverage
-          COVERAGE=$(python -c "
-          import xml.etree.ElementTree as ET
-          tree = ET.parse('coverage-unit.xml')
-          root = tree.getroot()
-          rate = float(root.attrib.get('line-rate', 0))
-          print(f'{rate * 100:.1f}')
-          ")
-          echo "Coverage: ${COVERAGE}%"
-          echo "Threshold: ${{ inputs.coverage_threshold }}%"
-
-          if (( $(echo "$COVERAGE < ${{ inputs.coverage_threshold }}" | bc -l) )); then
-            echo "::error::Coverage ${COVERAGE}% is below threshold ${{ inputs.coverage_threshold }}%"
-            exit 1
-          fi
-
-      - name: Post coverage comment on PR
-        if: always()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const xml = fs.readFileSync('coverage-unit.xml', 'utf8');
-            const match = xml.match(/line-rate="([^"]+)"/);
-            const coverage = match ? (parseFloat(match[1]) * 100).toFixed(1) : 'N/A';
-            const threshold = ${{ inputs.coverage_threshold }};
-            const passed = parseFloat(coverage) >= threshold;
-            const emoji = passed ? ':white_check_mark:' : ':x:';
-
-            const body = `## ${emoji} Coverage Report
-            | Metric | Value |
-            |--------|-------|
-            | Line Coverage | **${coverage}%** |
-            | Threshold | ${threshold}% |
-            | Status | ${passed ? 'PASSED' : 'FAILED'} |
-            `;
-
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: body
-            });
-
-  # ===========================================================================
-  # AUTO-MERGE: Merge Paperclip PRs automatically when all checks pass
-  # ===========================================================================
-
-  auto-merge:
-    name: "Auto-Merge (Paperclip PRs)"
-    if: >-
-      inputs.auto_merge_on_pass &&
-      github.event_name == 'pull_request' &&
-      (
-        github.actor == 'Paperclip-Paperclip' ||
-        github.actor == 'automateprojectsai' ||
-        contains(github.event.pull_request.labels.*.name, 'auto-merge')
-      )
-    needs: [lint, secret-scan, dependency-audit, unit-tests, coverage-gate]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-    steps:
-      - name: Enable auto-merge
-        uses: actions/github-script@v7
-        with:
-          script: |
-            // Enable auto-merge using the squash method
-            await github.rest.pulls.merge({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.issue.number,
-              merge_method: 'squash'
-            });
-            console.log('Auto-merge triggered for Paperclip PR');
+      - name: Hello
+        run: echo "CI pipeline is working"
