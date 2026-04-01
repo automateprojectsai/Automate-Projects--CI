@@ -24,10 +24,6 @@ on:
         type: boolean
         default: false
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   # === TIER 1: Fast Gate ===
   html-validation:
