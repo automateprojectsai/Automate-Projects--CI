@@ -4,8 +4,38 @@ on:
   workflow_call:
 
 jobs:
-  test:
-    name: "Minimal Test"
+  html-validation:
+    name: "Tier 1 - HTML Validation"
     runs-on: ubuntu-latest
     steps:
-      - run: echo "Hello from reusable workflow"
+      - uses: actions/checkout@v4
+      - run: echo "HTML validation placeholder"
+
+  js-lint:
+    name: "Tier 1 - JavaScript Linting"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "JS lint placeholder"
+
+  secret-scan:
+    name: "Tier 1 - Secret Detection"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  link-check:
+    name: "Tier 1 - Broken Link Detection"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "Link check placeholder"
