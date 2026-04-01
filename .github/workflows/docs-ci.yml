@@ -122,9 +122,6 @@ jobs:
       (github.actor == 'Paperclip-Paperclip' || github.actor == 'automateprojectsai' || contains(github.event.pull_request.labels.*.name, 'auto-merge'))
     needs: [markdown-lint, yaml-validation, secret-scan]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
     steps:
       - name: Auto-merge PR
         uses: actions/github-script@v7
