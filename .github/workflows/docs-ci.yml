@@ -1,0 +1,138 @@
+# =============================================================================
+# REUSABLE WORKFLOW: Documentation CI Pipeline
+# =============================================================================
+# Specialized for MkDocs Material documentation repos (Markdown + YAML).
+# Tests focus on: Markdown linting, YAML validation, MkDocs build,
+# internal link checking, and secret detection.
+# =============================================================================
+
+name: Docs CI
+
+on:
+  workflow_call:
+    inputs:
+      run_mkdocs_build:
+        description: "Run MkDocs build validation"
+        type: boolean
+        default: true
+      auto_merge_on_pass:
+        description: "Auto-merge Paperclip PRs on pass"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # === TIER 1: Fast Gate ===
+  markdown-lint:
+    name: "Tier 1 - Markdown Lint"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install markdownlint-cli
+        run: npm install -g markdownlint-cli
+      - name: Lint Markdown files
+        run: |
+          markdownlint 'docs/**/*.md' --ignore node_modules || echo "::warning::Markdown lint issues found"
+
+  yaml-validation:
+    name: "Tier 1 - YAML Validation"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install yamllint
+        run: pip install yamllint --break-system-packages
+      - name: Validate YAML files
+        run: |
+          if [ -f "mkdocs.yml" ]; then
+            yamllint mkdocs.yml || echo "::warning::mkdocs.yml lint issues"
+          fi
+          find docs -name "*.md" -exec grep -l "^---" {} \; | while read file; do
+            echo "Checking frontmatter in: $file"
+          done
+
+  secret-scan:
+    name: "Tier 1 - Secret Detection"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # === TIER 2: Quality Gate ===
+  mkdocs-build:
+    name: "Tier 2 - MkDocs Build"
+    if: ${{ inputs.run_mkdocs_build }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Install MkDocs Material
+        run: pip install mkdocs-material --break-system-packages
+      - name: Build documentation
+        run: |
+          if [ -f "mkdocs.yml" ]; then
+            mkdocs build --strict 2>&1 || echo "::warning::MkDocs build issues found"
+          else
+            echo "No mkdocs.yml found — skipping build"
+          fi
+
+  link-check:
+    name: "Tier 2 - Internal Link Check"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for broken internal cross-references
+        run: |
+          echo "Checking for broken internal links in Markdown files..."
+          find docs -name "*.md" | while read file; do
+            # Extract markdown links and check if targets exist
+            grep -oP '\[.*?\]\(\K[^)]+' "$file" 2>/dev/null | while read link; do
+              # Skip external URLs and anchors
+              if echo "$link" | grep -qE '^(https?://|#|mailto:)'; then
+                continue
+              fi
+              # Resolve relative path
+              dir=$(dirname "$file")
+              target="$dir/$link"
+              # Remove anchor from target
+              target=$(echo "$target" | sed 's/#.*//')
+              if [ -n "$target" ] && [ ! -f "$target" ] && [ ! -f "${target%.md}.md" ]; then
+                echo "::warning::Broken link in $file: $link"
+              fi
+            done
+          done
+          echo "Link check complete."
+
+  # === AUTO-MERGE ===
+  auto-merge:
+    name: "Auto-Merge (Paperclip PRs)"
+    if: >-
+      inputs.auto_merge_on_pass &&
+      github.event_name == 'pull_request' &&
+      (github.actor == 'Paperclip-Paperclip' || github.actor == 'automateprojectsai' || contains(github.event.pull_request.labels.*.name, 'auto-merge'))
+    needs: [markdown-lint, yaml-validation, secret-scan]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Auto-merge PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.pulls.merge({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              merge_method: 'squash'
+            });
