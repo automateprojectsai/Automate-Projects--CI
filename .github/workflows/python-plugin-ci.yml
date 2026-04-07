@@ -20,7 +20,7 @@ on:
         type: number
         default: 25
       auto_merge_on_pass:
-        description: "Automatically merge if all checks pass (for Paperclip PRs)"
+        description: "DEPRECATED — no-op. Auto-merge is now handled by a separate workflow_run workflow in each repo."
         type: boolean
         default: false
 
@@ -265,31 +265,7 @@ jobs:
             exit 1
           fi
 
-  auto-merge:
-    name: "Auto-Merge (Paperclip PRs)"
-    # continue-on-error prevents auto-merge failures from failing the overall
-    # CI status check, avoiding a circular dependency with branch protection.
-    continue-on-error: true
-    if: >-
-      inputs.auto_merge_on_pass &&
-      github.event_name == 'pull_request' &&
-      (
-        github.actor == 'Paperclip-Paperclip' ||
-        github.actor == 'automateprojectsai' ||
-        contains(github.event.pull_request.labels.*.name, 'auto-merge')
-      )
-    needs: [lint, secret-scan, dependency-audit, unit-tests, coverage-gate]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Enable auto-merge
-        uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.pulls.merge({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.issue.number,
-              merge_method: 'squash'
-            });
-            console.log('Auto-merge triggered for Paperclip PR');
-
+  # auto-merge job removed — now handled by a separate workflow_run workflow
+  # in each plugin repo (.github/workflows/auto-merge.yml). This eliminates
+  # the circular dependency where auto-merge failure could fail the required
+  # CI status check, permanently blocking branch protection.
