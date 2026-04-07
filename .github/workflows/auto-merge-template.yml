@@ -1,0 +1,94 @@
+# =============================================================================
+# AUTO-MERGE TEMPLATE
+# =============================================================================
+# This file is a REFERENCE TEMPLATE. Do not trigger it directly.
+#
+# Plugin repos should copy .github/workflows/auto-merge.yml from this template.
+# Core repos (Web-Portal, Central-Brain, Knowledge-Base) must NOT use this.
+#
+# Trigger: workflow_run completion of the "CI" workflow.
+# This decouples auto-merge from the required CI status check, eliminating
+# the circular dependency that caused admin-only merges.
+# =============================================================================
+
+name: Auto-Merge
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    name: "Auto-Merge (Paperclip PRs)"
+    # Only run when:
+    #   1. CI passed (not failed/cancelled)
+    #   2. The triggering event was a pull_request (not a push to main)
+    #   3. The PR author is a known Paperclip automation actor
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      (
+        github.event.workflow_run.actor.login == 'Paperclip-Paperclip' ||
+        github.event.workflow_run.actor.login == 'automateprojectsai' ||
+        github.event.workflow_run.actor.login == 'github-actions[bot]'
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find and merge PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // workflow_run.pull_requests is populated for same-repo PRs
+            const prs = context.payload.workflow_run.pull_requests;
+            let prNumber;
+
+            if (prs && prs.length > 0) {
+              prNumber = prs[0].number;
+            } else {
+              // Fallback: search open PRs by head SHA (handles edge cases)
+              const headSha = context.payload.workflow_run.head_sha;
+              const { data: openPRs } = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+              });
+              const match = openPRs.find(pr => pr.head.sha === headSha);
+              if (!match) {
+                core.warning('No open PR found for workflow run head SHA — skipping auto-merge');
+                return;
+              }
+              prNumber = match.number;
+            }
+
+            // Check PR labels for auto-merge label as additional opt-in signal
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+
+            const hasAutoMergeLabel = pr.labels.some(l => l.name === 'auto-merge');
+            const isPaperclipActor = (
+              pr.user.login === 'Paperclip-Paperclip' ||
+              pr.user.login === 'automateprojectsai' ||
+              hasAutoMergeLabel
+            );
+
+            if (!isPaperclipActor) {
+              core.info(`PR #${prNumber} is not from a Paperclip actor — skipping auto-merge`);
+              return;
+            }
+
+            console.log(`Auto-merging PR #${prNumber} (${pr.title})`);
+            await github.rest.pulls.merge({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+              merge_method: 'squash',
+            });
+            console.log(`PR #${prNumber} merged successfully via squash`);

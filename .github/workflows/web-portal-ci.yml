@@ -12,7 +12,7 @@ on:
         type: boolean
         default: false
       auto_merge_on_pass:
-        description: "Auto-merge Paperclip PRs on pass"
+        description: "DEPRECATED — no-op. Auto-merge is now handled by a separate workflow_run workflow in each repo."
         type: boolean
         default: false
 
@@ -127,25 +127,8 @@ jobs:
           fi
           echo "Security check complete."
 
-  auto-merge:
-    name: "Auto-Merge (Paperclip PRs)"
-    # continue-on-error prevents auto-merge failures from failing the overall
-    # CI status check, avoiding a circular dependency with branch protection.
-    continue-on-error: true
-    if: >-
-      inputs.auto_merge_on_pass &&
-      github.event_name == 'pull_request' &&
-      (github.actor == 'Paperclip-Paperclip' || github.actor == 'automateprojectsai' || contains(github.event.pull_request.labels.*.name, 'auto-merge'))
-    needs: [html-validation, js-lint, secret-scan, link-check]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Auto-merge PR
-        uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.pulls.merge({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.issue.number,
-              merge_method: 'squash'
-            });
+  # auto-merge job removed — now handled by a separate workflow_run workflow
+  # in each plugin repo (.github/workflows/auto-merge.yml). This eliminates
+  # the circular dependency where auto-merge failure could fail the required
+  # CI status check, permanently blocking branch protection.
+  # Web-Portal is a core repo and does NOT have an auto-merge workflow.
