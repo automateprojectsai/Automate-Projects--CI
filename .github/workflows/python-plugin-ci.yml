@@ -267,6 +267,9 @@ jobs:
 
   auto-merge:
     name: "Auto-Merge (Paperclip PRs)"
+    # continue-on-error prevents auto-merge failures from failing the overall
+    # CI status check, avoiding a circular dependency with branch protection.
+    continue-on-error: true
     if: >-
       inputs.auto_merge_on_pass &&
       github.event_name == 'pull_request' &&
