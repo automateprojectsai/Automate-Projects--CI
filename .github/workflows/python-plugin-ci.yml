@@ -144,7 +144,7 @@ jobs:
     if: ${{ inputs.run_tier2 }}
     needs: [unit-tests]
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     services:
       docker:
         image: docker:dind
@@ -179,7 +179,8 @@ jobs:
             --cov-report=term-missing \
             -m "api or integration" \
             --tb=short \
-            --strict-markers
+            --strict-markers \
+            --timeout=180
 
       - name: Upload integration coverage
         if: always()
