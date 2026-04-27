@@ -182,7 +182,8 @@ jobs:
             -m "(api or integration) and not performance and not nightly" \
             --tb=short \
             --strict-markers \
-            --timeout=180
+            --timeout=180 \
+            --timeout-method=thread
 
       - name: Upload integration coverage
         if: always()
