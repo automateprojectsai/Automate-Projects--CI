@@ -144,11 +144,9 @@ jobs:
     if: ${{ inputs.run_tier2 }}
     needs: [unit-tests]
     runs-on: ubuntu-latest
-    timeout-minutes: 35
-    services:
-      docker:
-        image: docker:dind
-        options: --privileged
+    # 35 min was too tight once performance/nightly tests leaked in.
+    # With those excluded the suite runs in ~8-10 min; 20 min is ample headroom.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -173,11 +171,15 @@ jobs:
           AWS_SECRET_ACCESS_KEY: "testing"
           AWS_DEFAULT_REGION: "us-east-1"
         run: |
+          # Explicitly exclude nightly/performance tests so the -m flag does not
+          # override pyproject.toml addopts and accidentally pull in the 100k-user
+          # seed fixture that causes the PostgreSQL testcontainer to OOM.
+          # See AUT-1486 for the full incident analysis.
           pytest tests/api tests/integration -v \
             --cov=app \
             --cov-report=xml:coverage-integration.xml \
             --cov-report=term-missing \
-            -m "api or integration" \
+            -m "(api or integration) and not performance and not nightly" \
             --tb=short \
             --strict-markers \
             --timeout=180
@@ -293,4 +295,3 @@ jobs:
               merge_method: 'squash'
             });
             console.log('Auto-merge triggered for Paperclip PR');
-
