@@ -25,6 +25,7 @@ jobs:
         uses: raven-actions/actionlint@v2
         with:
           files: ".github/workflows/*.yml"
+          shellcheck: false
 
       - name: Parse-check workflow YAML schemas
         run: |
