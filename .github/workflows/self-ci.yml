@@ -1,0 +1,47 @@
+# =============================================================================
+# SELF-CI: Validate this repo's own workflow files
+# =============================================================================
+# This workflow runs on pull requests and pushes to main, providing a real
+# status check that branch protection can gate on. Without it, PRs against
+# this repo sit in "Checks pending" forever because the reusable workflows
+# only trigger via workflow_call from other repos.
+# =============================================================================
+
+name: Self-CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  validate-workflows:
+    name: Validate reusable workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run actionlint
+        uses: raven-actions/actionlint@v2
+        with:
+          files: ".github/workflows/*.yml"
+
+      - name: Parse-check workflow YAML schemas
+        run: |
+          pip install pyyaml
+          python - <<'PY'
+          import yaml, glob, sys
+
+          ok = True
+          for f in sorted(glob.glob(".github/workflows/*.yml")):
+              try:
+                  data = yaml.safe_load(open(f))
+                  if not isinstance(data, dict):
+                      raise ValueError("top-level YAML is not a mapping")
+                  print(f"OK: {f}")
+              except Exception as e:
+                  print(f"FAIL: {f} -- {e}")
+                  ok = False
+
+          sys.exit(0 if ok else 1)
+          PY
